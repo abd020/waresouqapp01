@@ -1,17 +1,35 @@
 
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { login, register, logout as logoutApi } from '../api';
+import { supabase } from '../config/supabase';
 
 
 export const registerUser = createAsyncThunk(
   'auth/register',
   async (userData, { rejectWithValue }) => {
     try {
-      const response = await register(userData);
-      return response.data;
+      const { data, error } = await supabase.auth.signUp({
+        email: userData.email,
+        password: userData.password,
+        options: {
+          data: {
+            fullName: userData.fullName || '',
+            phone: userData.phone || '',
+          },
+        },
+      });
+
+      if (error) throw error;
+
+      // Store user data locally
+      await AsyncStorage.setItem('userData', JSON.stringify(data.user));
+      
+      return {
+        user: data.user,
+        session: data.session,
+      };
     } catch (error) {
-      return rejectWithValue(error.response?.data || 'An error occurred during registration');
+      return rejectWithValue(error.message || 'An error occurred during registration');
     }
   }
 );
@@ -21,12 +39,25 @@ export const loginUser = createAsyncThunk(
   'auth/login',
   async (credentials, { rejectWithValue }) => {
     try {
-      const response = await login(credentials);
-      await AsyncStorage.setItem('accessToken', response.data.accessToken);
-      await AsyncStorage.setItem('userData', JSON.stringify(response.data.user));
-      return response.data;
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: credentials.email,
+        password: credentials.password,
+      });
+
+      if (error) throw error;
+
+      // Store user data and token locally
+      await AsyncStorage.setItem('userData', JSON.stringify(data.user));
+      if (data.session) {
+        await AsyncStorage.setItem('accessToken', data.session.access_token);
+      }
+
+      return {
+        user: data.user,
+        session: data.session,
+      };
     } catch (error) {
-      return rejectWithValue(error.response?.data || 'An error occurred during login');
+      return rejectWithValue(error.message || 'An error occurred during login');
     }
   }
 );
@@ -36,11 +67,13 @@ export const logoutUser = createAsyncThunk(
   'auth/logout',
   async (_, { rejectWithValue }) => {
     try {
-      await logoutApi();
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+
       await AsyncStorage.removeItem('accessToken');
       await AsyncStorage.removeItem('userData');
     } catch (error) {
-      return rejectWithValue(error.response?.data || 'An error occurred during logout');
+      return rejectWithValue(error.message || 'An error occurred during logout');
     }
   }
 );
@@ -49,20 +82,46 @@ export const logoutUser = createAsyncThunk(
 export const checkAuth = createAsyncThunk(
   'auth/check',
   async (_, { dispatch }) => {
-    const accessToken = await AsyncStorage.getItem('accessToken');
-    const userData = await AsyncStorage.getItem('userData');
+    try {
+      // Check if there's an active session
+      const {
+        data: { session },
+        error,
+      } = await supabase.auth.getSession();
 
-    if (accessToken && userData) {
-      return { user: JSON.parse(userData), accessToken };
+      if (error) throw error;
+
+      if (session?.user) {
+        await AsyncStorage.setItem('userData', JSON.stringify(session.user));
+        await AsyncStorage.setItem('accessToken', session.access_token);
+        return {
+          user: session.user,
+          session,
+        };
+      }
+
+      // Try to restore from local storage
+      const userData = await AsyncStorage.getItem('userData');
+      const accessToken = await AsyncStorage.getItem('accessToken');
+
+      if (userData && accessToken) {
+        return {
+          user: JSON.parse(userData),
+          session: { access_token: accessToken },
+        };
+      }
+
+      return null;
+    } catch (error) {
+      console.error('Auth check error:', error);
+      return null;
     }
-
-    return null;
   }
 );
 
 const initialState = {
   user: null,
-  accessToken: null,
+  session: null,
   loading: false,
   error: null,
   isAuthenticated: false,
@@ -88,9 +147,11 @@ const authSlice = createSlice({
         state.loading = true;
         state.error = null;
       })
-      .addCase(registerUser.fulfilled, (state) => {
+      .addCase(registerUser.fulfilled, (state, action) => {
         state.loading = false;
-        
+        state.user = action.payload.user;
+        state.session = action.payload.session;
+        state.isAuthenticated = !!action.payload.session;
       })
       .addCase(registerUser.rejected, (state, action) => {
         state.loading = false;
@@ -105,7 +166,7 @@ const authSlice = createSlice({
       .addCase(loginUser.fulfilled, (state, action) => {
         state.loading = false;
         state.user = action.payload.user;
-        state.accessToken = action.payload.accessToken;
+        state.session = action.payload.session;
         state.isAuthenticated = true;
       })
       .addCase(loginUser.rejected, (state, action) => {
@@ -119,7 +180,7 @@ const authSlice = createSlice({
       })
       .addCase(logoutUser.fulfilled, (state) => {
         state.user = null;
-        state.accessToken = null;
+        state.session = null;
         state.isAuthenticated = false;
         state.loading = false;
         state.error = null;
@@ -137,7 +198,7 @@ const authSlice = createSlice({
         state.loading = false;
         if (action.payload) {
           state.user = action.payload.user;
-          state.accessToken = action.payload.accessToken;
+          state.session = action.payload.session;
           state.isAuthenticated = true;
         }
       })
